@@ -187,6 +187,9 @@ def make_env(config, **overrides):
   kwargs.update(overrides)
   kwargs.update({'platform':config.jax.platform})
   env = ctor(task, **kwargs)
+  if hallu in config and getattr(config.hallu, enabled, False):
+    from envs.hallu_wrappers import GhostAwareWrapper
+    env = GhostAwareWrapper(env, level=config.hallu.level, cfg=dict(config.hallu))
   return wrap_env(env, config)
 
 
