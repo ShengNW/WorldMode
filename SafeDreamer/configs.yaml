@@ -250,6 +250,55 @@ osrp_vector:
 
 
 
+osrp_vector_phase2_common:
+  method: phase2_base
+  task: safetygymcoor_SafetyPointGoal1-v0
+  logdir: ./logdir_phase2/
+  envs.amount: 1
+  env.safetygymcoor: {size: [64,64], repeat: 5, render: True, obs_key: 'observation', camera_name: 'fixedfar'}
+  run:
+    script: train_eval
+    steps: 1e7
+    eval_every: 1e4
+    eval_initial: False
+    eval_eps: 1
+
+osrp_vector_unsafe:
+  method: unsafe_dreamer
+  use_cost: False
+  cost_limit: 1000000.0
+  lagrange_multiplier_init: 0.0
+  penalty_multiplier_init: 0.0
+  hallu.enabled: False
+
+osrp_vector_safedreamer_clean:
+  method: safedreamer_clean
+  use_cost: True
+  cost_limit: 2.0
+  lagrange_multiplier_init: 0.001
+  penalty_multiplier_init: 0.01
+  hallu.enabled: False
+
+osrp_vector_safedreamer_hallu_strict:
+  method: safedreamer_hallu_strict
+  use_cost: True
+  cost_limit: 2.0
+  lagrange_multiplier_init: 0.005
+  penalty_multiplier_init: 0.05
+  pessimistic: True
+  hallu.enabled: True
+  hallu.level: 2
+
+osrp_vector_safedreamer_hallu_relaxed:
+  method: safedreamer_hallu_relaxed
+  use_cost: True
+  cost_limit: 8.0
+  lagrange_multiplier_init: 0.0001
+  penalty_multiplier_init: 0.001
+  pessimistic: False
+  hallu.enabled: True
+  hallu.level: 2
+
 dreamerv3:
   task_behavior: Greedy
   expl_behavior: None
