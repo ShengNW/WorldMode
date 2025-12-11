@@ -88,7 +88,9 @@ def main():
     try:
         obs = env.reset() if hasattr(env, "reset") else env.step({"reset": True})
         if isinstance(obs, dict):
-            first = obs.get("image") or obs.get("image_far")
+            first = obs.get("image")
+            if first is None:
+                first = obs.get("image_far")
             if first is not None:
                 frames.append(np.array(first, copy=True))
 
@@ -98,7 +100,9 @@ def main():
             obs = env.step(action)
             frame = None
             if isinstance(obs, dict):
-                frame = obs.get("image") or obs.get("image_far")
+                frame = obs.get("image")
+                if frame is None:
+                    frame = obs.get("image_far")
             if frame is not None:
                 frames.append(np.array(frame, copy=True))
 
