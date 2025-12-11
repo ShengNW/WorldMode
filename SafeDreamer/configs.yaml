@@ -60,6 +60,13 @@ defaults:
     safetygym: {size: [64,64], repeat: 1, render: False, obs_key: 'observation', camera_name: 'fixedfar'}
     safetygymcoor: {size: [64,64], repeat: 5, render: False, obs_key: 'observation', camera_name: 'fixedfar'}
     safetygymmujoco: {size: [64,64], repeat: 1, render: False, obs_key: 'observation'}
+  hallu:
+    enabled: False
+    level: 1
+    level_cfg:
+      "1": {fp_prob: 0.1, fn_prob: 0.0, min_frames: 1, max_frames: 2, max_ghosts: 1}
+      "2": {fp_prob: 0.3, fn_prob: 0.05, min_frames: 3, max_frames: 5, max_ghosts: 2}
+      "3": {fp_prob: 0.5, fn_prob: 0.1, min_frames: 5, max_frames: 10, max_ghosts: 3}
   # Agent
   task_behavior: Greedy
   expl_behavior: None

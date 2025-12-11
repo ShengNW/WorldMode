@@ -121,6 +121,8 @@ class SafetyGymCoor(embodied.Env):
             obs['image_far'] = self._env.task.render(width=1024, height=1024, mode='rgb_array', camera_name='fixedfar', cost={'cost_sum': obs['cost']})
         else:
             obs['image_far'] = self.render()
+        # Alias to 'image' so downstream logging can pick it up with default keys.
+        obs['image'] = obs['image_far']
     return obs
 
   def _reset(self):
