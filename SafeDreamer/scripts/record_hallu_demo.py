@@ -14,6 +14,8 @@ from typing import Dict, Any
 
 import sys
 import os
+# Prefer OSMesa to avoid EGL device issues on headless boxes.
+os.environ.setdefault("MUJOCO_GL", "osmesa")
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -42,7 +44,6 @@ def load_hallu_cfg(level: int) -> Dict[str, Any]:
 
 
 def make_env(mode: str, level: int, cfg: Dict[str, Any]):
-    os.environ.setdefault("MUJOCO_GL", "egl")
     try:
         env = SafetyGymCoor(
             "SafetyPointGoal1-v0",
@@ -51,8 +52,8 @@ def make_env(mode: str, level: int, cfg: Dict[str, Any]):
             render=True,
         )
     except ImportError:
-        # Fallback to OSMesa on machines where EGL device display is unavailable.
-        os.environ["MUJOCO_GL"] = "osmesa"
+        # If osmesa is not available, fall back to egl.
+        os.environ["MUJOCO_GL"] = "egl"
         env = SafetyGymCoor(
             "SafetyPointGoal1-v0",
             platform="gpu",
