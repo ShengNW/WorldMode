@@ -91,27 +91,6 @@ def main(argv=None):
       cleanup.append(env)
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.eval_only(agent, env, logger, args, lag)
-      # Save a quick rollout video from the first env for visual sanity.
-      try:
-        import imageio
-        frames = []
-        env0 = env.envs[0] if hasattr(env, 'envs') else env
-        env0.reset()
-        for _ in range(int(config.run.steps)):
-          # Sample random actions to force movement; avoids depending on agent state here.
-          action = {k: v.sample() for k, v in env0.act_space.items() if k != 'reset'}
-          obs = env0.step({**action, 'reset': False})
-          frame = None
-          if isinstance(obs, dict):
-            frame = obs.get('image') or obs.get('image_far')
-          if frame is not None:
-            frames.append(frame)
-        if frames:
-          video_path = logdir / 'eval_render.mp4'
-          imageio.mimwrite(video_path, frames, fps=10)
-          print(f'[eval_only] saved video to {video_path}')
-      except Exception as e:
-        print(f'[eval_only] video dump failed: {e}')
 
     elif args.script == 'parallel':
       assert config.run.actor_batch <= config.envs.amount, (
