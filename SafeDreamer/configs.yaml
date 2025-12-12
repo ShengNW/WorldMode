@@ -76,6 +76,12 @@ defaults:
 
   # World Model
   grad_heads: [decoder, reward, cont, cost]
+  model:
+    kind: rssm
+    ghost_label_key: ghost_labels
+    ghost_mask_key: ghost_mask
+    ghost_loss_scale: 1.0
+    ghost_head: {layers: 3, units: 512, act: silu, norm: layer, dist: binary, outscale: 1.0, outnorm: False, inputs: [deter, stoch], winit: normal, fan: avg}
   rssm: {deter: 4096, units: 1024, stoch: 32, classes: 32, act: silu, norm: layer, initial: learned, unimix: 0.01, unroll: False, action_clip: 1.0, winit: normal, fan: avg}
   encoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, resize: stride, winit: normal, fan: avg, symlog_inputs: True, minres: 4}
   decoder: {mlp_keys: '.*', cnn_keys: '.*', act: silu, norm: layer, mlp_layers: 5, mlp_units: 1024, cnn: resnet, cnn_depth: 96, cnn_blocks: 0, image_dist: mse, vector_dist: mse, inputs: [deter, stoch], resize: stride, winit: normal, fan: avg, outscale: 1.0, minres: 4, cnn_sigmoid: False}
@@ -105,6 +111,10 @@ defaults:
   penalty_multiplier_init: 5e-9
   lagrange_multiplier_init: 1e-6
   use_cost: True
+  use_ghost_budget: False
+  ghost_budget: 1.0
+  ghost_penalty_multiplier_init: 5e-9
+  ghost_lagrange_multiplier_init: 1e-6
   pessimistic: False
   cost_weight: 10.0
   cost_limit: 25.0
@@ -249,55 +259,79 @@ osrp_vector:
   decoder: {mlp_keys: '.*', cnn_keys: '$^'}
 
 
-
 osrp_vector_phase2_common:
-  method: phase2_base
   task: safetygymcoor_SafetyPointGoal1-v0
   logdir: ./logdir_phase2/
   envs.amount: 1
-  env.safetygymcoor: {size: [64,64], repeat: 5, render: True, obs_key: 'observation', camera_name: 'fixedfar'}
-  run:
-    script: train_eval
-    steps: 1e7
-    eval_every: 1e4
-    eval_initial: False
-    eval_eps: 1
+  env.safetygymcoor: {size: [64,64], repeat: 5, render: False, obs_key: 'observation', camera_name: 'fixedfar'}
+  hallu.enabled: False
+  hallu.level: 2
+  run.log_every: 500
+  run.save_every: 2000
+  run.eval_every: 2000
 
 osrp_vector_unsafe:
   method: unsafe_dreamer
   use_cost: False
-  cost_limit: 1000000.0
-  lagrange_multiplier_init: 0.0
-  penalty_multiplier_init: 0.0
+  cost_limit: 1e6
   hallu.enabled: False
 
 osrp_vector_safedreamer_clean:
   method: safedreamer_clean
   use_cost: True
   cost_limit: 2.0
-  lagrange_multiplier_init: 0.001
-  penalty_multiplier_init: 0.01
   hallu.enabled: False
 
 osrp_vector_safedreamer_hallu_strict:
   method: safedreamer_hallu_strict
   use_cost: True
   cost_limit: 2.0
-  lagrange_multiplier_init: 0.005
-  penalty_multiplier_init: 0.05
-  pessimistic: True
   hallu.enabled: True
   hallu.level: 2
+  pessimistic: True
+  penalty_multiplier_init: 1e-3
+  lagrange_multiplier_init: 1e-3
 
 osrp_vector_safedreamer_hallu_relaxed:
   method: safedreamer_hallu_relaxed
   use_cost: True
   cost_limit: 8.0
-  lagrange_multiplier_init: 0.0001
-  penalty_multiplier_init: 0.001
-  pessimistic: False
   hallu.enabled: True
   hallu.level: 2
+  pessimistic: False
+  penalty_multiplier_init: 1e-5
+  lagrange_multiplier_init: 1e-5
+
+ours_v0:
+  method: ours_v0
+  logdir: ./logdir_phase3/
+  use_cost: True
+  cost_limit: 4.0
+  hallu.enabled: True
+  hallu.level: 2
+  model.kind: rssm
+  use_ghost_budget: False
+  run.log_every: 500
+  run.save_every: 2000
+  run.eval_every: 2000
+
+ours_full:
+  method: ours_full
+  logdir: ./logdir_phase3/
+  use_cost: True
+  cost_limit: 4.0
+  hallu.enabled: True
+  hallu.level: 2
+  model.kind: rssm_ghost
+  model.ghost_loss_scale: 1.0
+  use_ghost_budget: True
+  ghost_budget: 0.25
+  ghost_lagrange_multiplier_init: 1e-3
+  ghost_penalty_multiplier_init: 1e-3
+  run.log_every: 500
+  run.save_every: 2000
+  run.eval_every: 2000
+
 
 dreamerv3:
   task_behavior: Greedy

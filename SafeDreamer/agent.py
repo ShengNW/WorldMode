@@ -17,6 +17,7 @@ from . import jaxagent
 from . import jaxutils
 from . import nets
 from . import ninjax as nj
+from .rssm_ghost import GhostAwareRSSM
 
 def symexp(x):
   return jnp.sign(x) * (jnp.exp(jnp.abs(x)) - 1)
@@ -166,21 +167,40 @@ class WorldModel(nj.Module):
     self.obs_space = obs_space
     self.act_space = act_space['action']
     self.config = config
-    shapes = {k: tuple(v.shape) for k, v in obs_space.items()}
-    shapes = {k: v for k, v in shapes.items() if not k.startswith('log_')}
+    self.grad_heads = list(self.config.grad_heads)
+    model_cfg = getattr(config, 'model', None)
+    self.model_kind = getattr(model_cfg, 'kind', 'rssm') if model_cfg else 'rssm'
+    self.ghost_label_key = getattr(model_cfg, 'ghost_label_key', None) if model_cfg else None
+    self.ghost_mask_key = getattr(model_cfg, 'ghost_mask_key', None) if model_cfg else None
+    shapes_all = {k: tuple(v.shape) for k, v in obs_space.items()}
+    ghost_label_shape = shapes_all.get(self.ghost_label_key) if self.ghost_label_key else None
+    if ghost_label_shape:
+      ghost_label_shape = tuple(int(x) for x in ghost_label_shape)
+    shapes = {
+        k: v for k, v in shapes_all.items()
+        if (not k.startswith('log_') and k not in {self.ghost_label_key, self.ghost_mask_key})}
     self.encoder = nets.MultiEncoder(shapes, **config.encoder, name='enc')
-    self.rssm = nets.RSSM(**config.rssm, name='rssm')
+    rssm_cls = GhostAwareRSSM if self.model_kind == 'rssm_ghost' else nets.RSSM
+    self.rssm = rssm_cls(**config.rssm, name='rssm')
     self.heads = {
         'decoder': nets.MultiDecoder(shapes, **config.decoder, name='dec'),
         'reward': nets.MLP((), **config.reward_head, name='rew'),
         'cont': nets.MLP((), **config.cont_head, name='cont')}
     if self.config.use_cost:
       self.heads['cost'] = nets.MLP((), **config.cost_head, name='cost')
+    if self.model_kind == 'rssm_ghost' and ghost_label_shape:
+      ghost_head_cfg = getattr(model_cfg, 'ghost_head', {})
+      self.heads['ghost'] = nets.MLP(
+          ghost_label_shape, **ghost_head_cfg, name='ghost')
+      if 'ghost' not in self.grad_heads:
+        self.grad_heads.append('ghost')
     self.opt = jaxutils.Optimizer(name='model_opt', **config.model_opt)
     scales = self.config.loss_scales.copy()
     image, vector = scales.pop('image'), scales.pop('vector')
     scales.update({k: image for k in self.heads['decoder'].cnn_shapes})
     scales.update({k: vector for k in self.heads['decoder'].mlp_shapes})
+    if 'ghost' in self.heads:
+      scales['ghost'] = getattr(model_cfg, 'ghost_loss_scale', 1.0)
     self.scales = scales
 
   def initial(self, batch_size):
@@ -205,13 +225,15 @@ class WorldModel(nj.Module):
     dists = {}
     feats = {**post, 'embed': embed}
     for name, head in self.heads.items():
-      out = head(feats if name in self.config.grad_heads else sg(feats))
+      out = head(feats if name in self.grad_heads else sg(feats))
       out = out if isinstance(out, dict) else {name: out}
       dists.update(out)
     losses = {}
     losses['dyn'] = self.rssm.dyn_loss(post, prior, **self.config.dyn_loss)
     losses['rep'] = self.rssm.rep_loss(post, prior, **self.config.rep_loss)
     for key, dist in dists.items():
+      if key == 'ghost':
+        continue
       if key == 'cost':
         condition = jnp.greater_equal(data['cost'], 1.0)
         loss = -dist.log_prob(data['cost'].astype(jnp.float32))
@@ -220,6 +242,20 @@ class WorldModel(nj.Module):
         loss = -dist.log_prob(data[key].astype(jnp.float32))
       assert loss.shape == embed.shape[:2], (key, loss.shape)
       losses[key] = loss
+    if 'ghost' in dists and self.ghost_label_key and self.ghost_label_key in data:
+      logits = dists['ghost'].distribution.logits_parameter()
+      target = data[self.ghost_label_key].astype(jnp.float32)
+      mask = None
+      if self.ghost_mask_key and self.ghost_mask_key in data:
+        mask = data[self.ghost_mask_key].astype(jnp.float32)
+      if mask is None:
+        mask = jnp.ones_like(target)
+      target = jnp.broadcast_to(target, logits.shape)
+      mask = jnp.broadcast_to(mask, logits.shape)
+      bce = jnp.maximum(logits, 0) - logits * target + jnp.log1p(jnp.exp(-jnp.abs(logits)))
+      ghost_loss = (bce * mask).sum(-1) / jnp.maximum(mask.sum(-1), 1.0)
+      assert ghost_loss.shape == embed.shape[:2], (ghost_loss.shape, embed.shape)
+      losses['ghost'] = ghost_loss
     scaled = {k: v * self.scales[k] for k, v in losses.items()}
     model_loss = sum(scaled.values())
     out = {'embed':  embed, 'post': post, 'prior': prior}
@@ -256,6 +292,10 @@ class WorldModel(nj.Module):
         k: jnp.concatenate([start[k][None], v], 0) for k, v in traj.items()}
     cont = self.heads['cont'](traj).mode()
     traj['cont'] = jnp.concatenate([first_cont[None], cont[1:]], 0)
+    if 'ghost' in self.heads:
+      ghost_dist = self.heads['ghost'](traj)
+      ghost_probs = jax.nn.sigmoid(ghost_dist.distribution.logits_parameter())
+      traj['ghost_prob'] = ghost_probs
     discount = 1 - 1 / self.config.horizon
     traj['weight'] = jnp.cumprod(discount * traj['cont'], 0) / discount
     return traj
@@ -345,6 +385,11 @@ class WorldModel(nj.Module):
     if 'cost' in dists and 'cost' in data.keys() and not self.config.jax.debug_nans:
       stats = jaxutils.balance_stats(dists['cost'], data['cost'], 0.1)
       metrics.update({f'cost_{k}': v for k, v in stats.items()})
+    if 'ghost' in dists and self.ghost_label_key and self.ghost_label_key in data:
+      ghost_logits = dists['ghost'].distribution.logits_parameter()
+      ghost_probs = jax.nn.sigmoid(ghost_logits)
+      metrics['ghost_pred_mean'] = ghost_probs.mean()
+      metrics['ghost_label_mean'] = data[self.ghost_label_key].astype(jnp.float32).mean()
     return metrics
 
 class ImagSafeActorCritic(nj.Module):
@@ -363,7 +408,18 @@ class ImagSafeActorCritic(nj.Module):
     self.cost_scales = cost_scales
     self.act_space = act_space
     self.config = config
-    self.lagrange = jaxutils.Lagrange(self.config.lagrange_multiplier_init, self.config.penalty_multiplier_init, self.config.cost_limit, name=f'lagrange')
+    self.use_ghost_budget = getattr(self.config, 'use_ghost_budget', False)
+    if self.use_ghost_budget:
+      self.dual_lagrange = jaxutils.DualLagrange(
+          hard_lagrange_multiplier_init=self.config.lagrange_multiplier_init,
+          hard_penalty_multiplier_init=self.config.penalty_multiplier_init,
+          hard_cost_limit=self.config.cost_limit,
+          ghost_lagrange_multiplier_init=getattr(self.config, 'ghost_lagrange_multiplier_init', self.config.lagrange_multiplier_init),
+          ghost_penalty_multiplier_init=getattr(self.config, 'ghost_penalty_multiplier_init', self.config.penalty_multiplier_init),
+          ghost_cost_limit=getattr(self.config, 'ghost_budget', 1.0),
+          name='dual_lagrange')
+    else:
+      self.lagrange = jaxutils.Lagrange(self.config.lagrange_multiplier_init, self.config.penalty_multiplier_init, self.config.cost_limit, name=f'lagrange')
     disc = act_space.discrete
     self.grad = config.actor_grad_disc if disc else config.actor_grad_cont
     self.actor = nets.MLP(
@@ -424,6 +480,10 @@ class ImagSafeActorCritic(nj.Module):
     loss *= self.config.loss_scales.actor
     metrics.update(self._metrics(traj, policy, logpi, ent, adv))
     loss = loss.mean()
+    ghost_usage = None
+    if 'ghost_prob' in traj:
+      ghost_usage = (1.0 - traj['ghost_prob'][:-1]).mean(-1)
+      metrics['ghost_usage_mean'] = ghost_usage.mean()
 
     if self.config.expl_behavior not in ['CEMPlanner', 'CCEPlanner', 'PIDPlanner']:
 
@@ -440,15 +500,27 @@ class ImagSafeActorCritic(nj.Module):
         metrics.update(jaxutils.tensorstats(cost, f'{key}_cost'))
         metrics.update(jaxutils.tensorstats(cost_ret, f'{key}_cost_raw'))
         metrics.update(jaxutils.tensorstats(normed_ret, f'{key}_cost_normed'))
-        metrics[f'{key}_cost_rate'] = (jnp.abs(ret) >= 0.5).mean()
+        metrics[f'{key}_cost_rate'] = (jnp.abs(cost_ret) >= 0.5).mean()
       if self.config.pessimistic: 
-        cost_ret_episode = jnp.stack(cost_ret).sum(0)
+        cost_ret_episode = jnp.stack(cost_rets).sum(0)
       else:
-        cost_ret_episode = jnp.stack(cost_ret).mean(0)
-      penalty, lagrange_multiplier, penalty_multiplier = self.lagrange(cost_ret_episode)
-      metrics[f'lagrange_multiplier'] = lagrange_multiplier
-      metrics[f'penalty_multiplier'] = penalty_multiplier
-      metrics[f'penalty'] = penalty
+        cost_ret_episode = jnp.stack(cost_rets).mean(0)
+      ghost_usage_for_penalty = ghost_usage
+      if ghost_usage_for_penalty is None:
+        ghost_usage_for_penalty = jnp.zeros_like(cost_ret_episode)
+      if self.use_ghost_budget:
+        penalty, lag_info = self.dual_lagrange(cost_ret_episode, ghost_usage_for_penalty)
+        metrics[f'lagrange_multiplier'] = lag_info['nu_hard']
+        metrics[f'penalty_multiplier'] = lag_info['penalty_multiplier_hard']
+        metrics[f'penalty'] = penalty
+        metrics[f'ghost_lagrange_multiplier'] = lag_info['nu_ghost']
+        metrics[f'ghost_penalty_multiplier'] = lag_info['penalty_multiplier_ghost']
+        metrics[f'ghost_penalty'] = lag_info['penalty_ghost']
+      else:
+        penalty, lagrange_multiplier, penalty_multiplier = self.lagrange(cost_ret_episode)
+        metrics[f'lagrange_multiplier'] = lagrange_multiplier
+        metrics[f'penalty_multiplier'] = penalty_multiplier
+        metrics[f'penalty'] = penalty
       loss += penalty
     return loss, metrics
 

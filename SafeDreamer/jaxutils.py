@@ -265,6 +265,45 @@ class Lagrange(nj.Module):
     return psi, sg(self.lagrange_multiplier.read()), sg(self.penalty_multiplier.read())
 
 
+class DualLagrange(nj.Module):
+  def __init__(
+      self,
+      hard_lagrange_multiplier_init=1e-6,
+      hard_penalty_multiplier_init=5e-9,
+      hard_cost_limit=25.0,
+      ghost_lagrange_multiplier_init=1e-6,
+      ghost_penalty_multiplier_init=5e-9,
+      ghost_cost_limit=1.0,
+      name='dual_lagrange'):
+    self.hard = Lagrange(
+        hard_lagrange_multiplier_init,
+        hard_penalty_multiplier_init,
+        hard_cost_limit,
+        name=f'{name}_hard')
+    self.ghost = Lagrange(
+        ghost_lagrange_multiplier_init,
+        ghost_penalty_multiplier_init,
+        ghost_cost_limit,
+        name=f'{name}_ghost')
+
+  def __call__(self, hard_ret, ghost_ret):
+    hard_penalty, nu_hard, penalty_hard = self.hard(hard_ret)
+    ghost_penalty, nu_ghost, penalty_ghost = self.ghost(ghost_ret)
+    total = hard_penalty + ghost_penalty
+    info = {
+        'nu_hard': sg(nu_hard),
+        'penalty_multiplier_hard': sg(penalty_hard),
+        'penalty_hard': sg(hard_penalty),
+        'nu_ghost': sg(nu_ghost),
+        'penalty_multiplier_ghost': sg(penalty_ghost),
+        'penalty_ghost': sg(ghost_penalty),
+    }
+    return total, info
+
+  def update(self, hard_ret, ghost_ret):
+    return self.__call__(hard_ret, ghost_ret)
+
+
 class Moments(nj.Module):
 
   def __init__(

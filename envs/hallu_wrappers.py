@@ -23,8 +23,18 @@ class GhostAwareWrapper(embodied.core.base.Wrapper):
         self._hazard_slice = None
         self._hazard_slots = 0
         self._robot_slice = None
+        self._init_layout_from_env()
         self._load_level_params()
         self._reset_hallu_state()
+
+    def _init_layout_from_env(self) -> None:
+        if hasattr(self.env, "key_to_slice"):
+            key_to_slice = getattr(self.env, "key_to_slice", {}) or {}
+            if "hazards" in key_to_slice:
+                self._hazard_slice = key_to_slice["hazards"]
+                self._hazard_slots = max(1, (self._hazard_slice.stop - self._hazard_slice.start) // 2)
+            if "robot" in key_to_slice:
+                self._robot_slice = key_to_slice["robot"]
 
     def _load_level_params(self) -> None:
         default_level_cfg = {
@@ -86,24 +96,35 @@ class GhostAwareWrapper(embodied.core.base.Wrapper):
         self._maybe_start_fn()
 
         hallu_hazards = hazards.copy()
+        base_mask = np.ones(self._hazard_slots, dtype=bool)
+        ghost_indices = []
 
         if self._fn_state is not None:
             mask = self._fn_state["mask"]
             hallu_hazards[mask] = 0.0
+            base_mask[mask] = False
             self._fn_state["frames_left"] -= 1
             if self._fn_state["frames_left"] <= 0:
                 self._fn_state = None
 
         if self._fp_state is not None:
             ghosts = self._fp_state["coords"]
-            hallu_hazards = self._inject_ghosts(hallu_hazards, ghosts)
+            hallu_hazards, ghost_indices = self._inject_ghosts(hallu_hazards, ghosts)
             self._fp_state["frames_left"] -= 1
             if self._fp_state["frames_left"] <= 0:
                 self._fp_state = None
 
         obs_vec[self._hazard_slice] = hallu_hazards.astype(np.float32).flatten()
+        ghost_mask = base_mask.astype(np.float32)
+        ghost_labels = base_mask.astype(np.float32)
+        for idx in ghost_indices:
+            ghost_labels[idx] = 0.0
+            ghost_mask[idx] = 1.0
+
         obs_out = dict(obs)
         obs_out["observation"] = obs_vec
+        obs_out["ghost_labels"] = ghost_labels
+        obs_out["ghost_mask"] = ghost_mask
         return obs_out
 
     def _maybe_start_fp(self, obs_vec: np.ndarray) -> None:
@@ -137,16 +158,28 @@ class GhostAwareWrapper(embodied.core.base.Wrapper):
         ghosts = self.rng.uniform(-radius, radius, size=(count, 2)).astype(np.float32)
         return ghosts + center.reshape(1, 2)
 
-    def _inject_ghosts(self, hazards: np.ndarray, ghosts: np.ndarray) -> np.ndarray:
+    def _inject_ghosts(self, hazards: np.ndarray, ghosts: np.ndarray):
         hallu = hazards.copy()
         available = list(np.where(np.all(hallu == 0.0, axis=1))[0])
+        used_indices = []
         for g in ghosts:
             if available:
                 idx = available.pop(0)
             else:
                 idx = int(self.rng.integers(0, hallu.shape[0]))
             hallu[idx] = g
-        return hallu
+            used_indices.append(idx)
+        return hallu, used_indices
+
+    @property
+    def obs_space(self):
+        spaces = dict(self.env.obs_space)
+        if self._hazard_slice is None:
+            self._init_layout_from_env()
+        if self._hazard_slice is not None and self._hazard_slots > 0:
+            spaces["ghost_labels"] = embodied.Space(np.float32, (self._hazard_slots,), 0.0, 1.0)
+            spaces["ghost_mask"] = embodied.Space(np.float32, (self._hazard_slots,), 0.0, 1.0)
+        return spaces
 
 
 __all__ = ["GhostAwareWrapper"]
