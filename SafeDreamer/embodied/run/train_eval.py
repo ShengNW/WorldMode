@@ -133,7 +133,37 @@ def train_eval(
     if should_sync(updates):
       agent.sync()
     if should_log(step):
-      logger.add(metrics.result())
+      result = metrics.result()
+      # Sentinel + critical diagnostics forced into logger (avoid Metrics filtering)
+      step_scalar = int(step)
+      result['train_diag/sentinel'] = 1.0
+      result['train_diag/step'] = step_scalar
+      for k in ['lagrange_multiplier', 'ghost_lagrange_multiplier',
+                'penalty_multiplier', 'ghost_penalty_multiplier',
+                'wm_grad_overflow', 'wm_grad_steps',
+                'actor_grad_overflow', 'actor_grad_steps']:
+        if f'train/{k}' in result:
+          result[f'train_diag/{k}'] = float(result[f'train/{k}'])
+        elif k in mets:
+          result[f'train_diag/{k}'] = float(mets[k])
+      logger.add(result)
+      # Bypass logger pipeline: append diagnostics to diag.jsonl
+      diag_path = logdir / 'diag.jsonl'
+      diag_rec = {'step': step_scalar}
+      for k in ['lagrange_multiplier', 'ghost_lagrange_multiplier',
+                'penalty_multiplier', 'ghost_penalty_multiplier',
+                'wm_grad_overflow', 'wm_grad_steps',
+                'actor_grad_overflow', 'actor_grad_steps']:
+        if k in mets:
+          try:
+            diag_rec[k] = float(mets[k])
+          except Exception:
+            diag_rec[k] = None
+      with diag_path.open('a') as f:
+        import json as _json
+        f.write(_json.dumps(diag_rec) + '\\n')
+      if step_scalar <= 500 or step_scalar % 200 == 0:
+        print('[diag-jsonl]', diag_rec)
       logger.add(agent.report(batch[0]), prefix='report')
       with timer.scope('dataset_eval'):
         eval_batch = next(dataset_eval)
@@ -168,4 +198,3 @@ def train_eval(
       checkpoint.save()
   logger.write()
   logger.write()
-
