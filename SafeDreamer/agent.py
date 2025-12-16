@@ -95,7 +95,8 @@ class Agent(nj.Module):
         outs = task_outs
         outs['log_entropy'] = outs['action'].entropy()
 
-    if self.config.expl_behavior not in ['CEMPlanner', 'CCEPlanner', 'PIDPlanner']:
+    # Always compute cost penalties (was gated by expl_behavior).
+    if True:
       outs['log_plan_action_mean'] = jnp.zeros(outs['action'].shape)
       outs['log_plan_action_std'] = jnp.zeros(outs['action'].shape)
       outs['log_plan_num_safe_traj'] = jnp.zeros(outs['action'].shape[:1])
@@ -390,8 +391,6 @@ class WorldModel(nj.Module):
       ghost_probs = jax.nn.sigmoid(ghost_logits)
       metrics['ghost_pred_mean'] = ghost_probs.mean()
       metrics['ghost_label_mean'] = data[self.ghost_label_key].astype(jnp.float32).mean()
-      if self.ghost_mask_key and self.ghost_mask_key in data:
-        metrics['ghost_mask_mean'] = data[self.ghost_mask_key].astype(jnp.float32).mean()
     return metrics
 
 class ImagSafeActorCritic(nj.Module):
@@ -445,10 +444,12 @@ class ImagSafeActorCritic(nj.Module):
     def loss(start):
       policy = lambda s: self.actor(sg(s)).sample(seed=nj.rng())
       traj = imagine(policy, start, self.config.imag_horizon)
-      loss, metrics = self.loss(traj)
-      return loss, (traj, metrics)
-    mets, (traj, metrics) = self.opt(self.actor, loss, start, has_aux=True)
+      loss, metrics, lag_info = self.loss(traj)
+      return loss, (traj, metrics, lag_info)
+    mets, (traj, metrics, lag_info) = self.opt(self.actor, loss, start, has_aux=True)
     metrics.update(mets)
+    if lag_info:
+      metrics.update({f'lag_{k}': v for k, v in lag_info.items()})
     for key, critic in self.critics.items():
       mets = critic.train(traj, self.actor)
       metrics.update({f'{key}_critic_{k}': v for k, v in mets.items()})
@@ -460,6 +461,7 @@ class ImagSafeActorCritic(nj.Module):
 
   def loss(self, traj):
     metrics = {}
+    lag_info_out = {}
     advs = []
     total = sum(self.scales[k] for k in self.critics)
     for key, critic in self.critics.items():
@@ -484,22 +486,12 @@ class ImagSafeActorCritic(nj.Module):
     loss = loss.mean()
     ghost_usage = None
     if 'ghost_prob' in traj:
-      ghost_prob = traj['ghost_prob'][:-1]
-      ghost_mask = traj.get('ghost_mask')
-      if ghost_mask is None:
-        ghost_mask = jnp.ones_like(ghost_prob)
-      else:
-        ghost_mask = ghost_mask[:-1]
-        ghost_mask = jnp.broadcast_to(ghost_mask, ghost_prob.shape)
-      ghost_usage_unmasked = (1.0 - ghost_prob).mean(-1)
-      ghost_usage_masked = ((1.0 - ghost_prob) * ghost_mask).mean(-1)
-      ghost_usage = ghost_usage_masked
-      metrics['ghost_usage_unmasked_mean'] = ghost_usage_unmasked.mean()
-      metrics['ghost_usage_masked_mean'] = ghost_usage_masked.mean()
-      metrics['ghost_usage_mean'] = metrics['ghost_usage_masked_mean']
-      metrics['ghost_mask_mean'] = ghost_mask.mean()
+      ghost_usage = (1.0 - traj['ghost_prob'][:-1]).mean(-1)
+      metrics['ghost_usage_mean'] = ghost_usage.mean()
 
-    if self.config.expl_behavior not in ['CEMPlanner', 'CCEPlanner', 'PIDPlanner']:
+    # Force cost/dual branch to run even for planner behaviors so diagnostics
+    # (lag_* keys) are produced during debugging.
+    if True:
 
       cost_advs = []
       total = sum(self.cost_scales[k] for k in self.cost_critics)
@@ -524,26 +516,38 @@ class ImagSafeActorCritic(nj.Module):
         ghost_usage_for_penalty = jnp.zeros_like(cost_ret_episode)
       if self.use_ghost_budget:
         penalty, lag_info = self.dual_lagrange(cost_ret_episode, ghost_usage_for_penalty)
-        metrics['lagrange_multiplier'] = jnp.array(lag_info['nu_hard'], dtype=jnp.float32)
-        metrics['penalty_multiplier'] = jnp.array(lag_info['penalty_multiplier_hard'], dtype=jnp.float32)
+        metrics['lagrange_multiplier'] = lag_info['nu_hard']
+        metrics['penalty_multiplier'] = lag_info['penalty_multiplier_hard']
         metrics['penalty'] = penalty
-        metrics['ghost_lagrange_multiplier'] = jnp.array(lag_info['nu_ghost'], dtype=jnp.float32)
-        metrics['ghost_penalty_multiplier'] = jnp.array(lag_info['penalty_multiplier_ghost'], dtype=jnp.float32)
-        metrics['ghost_penalty'] = penalty if 'penalty_ghost' not in lag_info else lag_info['penalty_ghost']
+        metrics['ghost_lagrange_multiplier'] = lag_info['nu_ghost']
+        metrics['ghost_penalty_multiplier'] = lag_info['penalty_multiplier_ghost']
+        metrics['ghost_penalty'] = lag_info['penalty_ghost']
+        # Dual diagnostics for external logging (not relied on by training).
+        diag_keys = [
+            'Jc_hard', 'Jc_ghost',
+            'limit_hard', 'limit_ghost',
+            'g_hard', 'g_ghost',
+            'lambda_lr_hard', 'lambda_lr_ghost',
+            'upper_bound_hard', 'upper_bound_ghost',
+            'lambda_pre_hard', 'lambda_pre_ghost',
+            'lambda_post_hard', 'lambda_post_ghost',
+            'penalty_pre_hard', 'penalty_pre_ghost',
+            'penalty_post_hard', 'penalty_post_ghost',
+            'dual_update_calls',
+        ]
+        for k in diag_keys:
+          val = lag_info.get(k, None)
+          if val is None:
+            continue
+          metrics[f'lag_{k}'] = val
+          lag_info_out[f'lag_{k}'] = val
       else:
         penalty, lagrange_multiplier, penalty_multiplier = self.lagrange(cost_ret_episode)
-        metrics['lagrange_multiplier'] = jnp.array(lagrange_multiplier, dtype=jnp.float32)
-        metrics['penalty_multiplier'] = jnp.array(penalty_multiplier, dtype=jnp.float32)
-        metrics['penalty'] = penalty
+        metrics[f'lagrange_multiplier'] = lagrange_multiplier
+        metrics[f'penalty_multiplier'] = penalty_multiplier
+        metrics[f'penalty'] = penalty
       loss += penalty
-
-    # Critical diagnostics: force-write even if optimizers did not emit them
-    metrics['wm_grad_overflow'] = jnp.array(metrics.get('wm_model_opt_grad_overflow', 0.0), dtype=jnp.float32)
-    metrics['wm_grad_steps'] = jnp.array(metrics.get('wm_grad_steps', 0.0), dtype=jnp.float32)
-    metrics['actor_grad_overflow'] = jnp.array(metrics.get('task_behavior/actor_opt_grad_overflow', 0.0), dtype=jnp.float32)
-    metrics['actor_grad_steps'] = jnp.array(metrics.get('task_behavior/actor_grad_steps', 0.0), dtype=jnp.float32)
-
-    return loss, metrics
+    return loss, metrics, lag_info_out
 
   def _metrics(self, traj, policy, logpi, ent, adv):
     metrics = {}
