@@ -1,6 +1,7 @@
 import re
 
 import jax
+import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
@@ -230,6 +231,8 @@ class Lagrange(nj.Module):
     self.lagrange_multiplier = nj.Variable(jnp.full, (), lagrange_multiplier_init, jnp.float32, name='lagrange_multiplier')
     self.penalty_multiplier = nj.Variable(jnp.full, (), penalty_multiplier_init, jnp.float32, name='penalty_multiplier')
     self.cost_limit = cost_limit
+    # Populated every update; read by diagnostics.
+    self.debug_info = {}
 
   def __call__(self, x):
     return self.update(x)
@@ -252,17 +255,32 @@ class Lagrange(nj.Module):
 
     #cost_ret = mean(cost_ret)
 
-    g = mean(cost_ret - self.cost_limit)
-    lambda_ = self.lagrange_multiplier.read()
+    Jc = mean(cost_ret)
+    g = Jc - self.cost_limit
+    lambda_pre = self.lagrange_multiplier.read()
     c = self.penalty_multiplier.read()
-    cond = lambda_ + c * g
-    self.lagrange_multiplier.write(jnp.clip(cond, 0 ))
-    psi = jnp.where(jnp.greater(cond, 0.0),
-                    lambda_ * g + c / 2.0 * g ** 2,
-                    -1.0 / (2.0 * c) * lambda_ ** 2)
+    cond = lambda_pre + c * g
+    lambda_post = jnp.clip(cond, 0)
+    psi = jnp.where(
+        jnp.greater(cond, 0.0),
+        lambda_pre * g + c / 2.0 * g ** 2,
+        -1.0 / (2.0 * c) * lambda_pre ** 2)
     # Clip to make sure that c is non-decreasing.
-    self.penalty_multiplier.write(jnp.clip(c * (1e-5 + 1.0), c, 1.0))
-    return psi, sg(self.lagrange_multiplier.read()), sg(self.penalty_multiplier.read())
+    c_post = jnp.clip(c * (1e-5 + 1.0), c, 1.0)
+    self.lagrange_multiplier.write(lambda_post)
+    self.penalty_multiplier.write(c_post)
+    self.debug_info = {
+        'Jc': sg(Jc),
+        'limit': sg(jnp.array(self.cost_limit, dtype=jnp.float32)),
+        'g': sg(g),
+        'lambda_lr': sg(c),
+        'upper_bound': None,
+        'lambda_pre': sg(lambda_pre),
+        'lambda_post': sg(lambda_post),
+        'penalty_pre': sg(c),
+        'penalty_post': sg(c_post),
+    }
+    return psi, sg(lambda_post), sg(c_post)
 
 
 class DualLagrange(nj.Module):
@@ -285,10 +303,13 @@ class DualLagrange(nj.Module):
         ghost_penalty_multiplier_init,
         ghost_cost_limit,
         name=f'{name}_ghost')
+    self.dual_update_calls = nj.Variable(jnp.zeros, (), jnp.int32, name=f'{name}_update_calls')
+    self.last_info = {}
 
   def __call__(self, hard_ret, ghost_ret):
     hard_penalty, nu_hard, penalty_hard = self.hard(hard_ret)
     ghost_penalty, nu_ghost, penalty_ghost = self.ghost(ghost_ret)
+    self.dual_update_calls.write(self.dual_update_calls.read() + 1)
     total = hard_penalty + ghost_penalty
     info = {
         'nu_hard': sg(nu_hard),
@@ -297,7 +318,30 @@ class DualLagrange(nj.Module):
         'nu_ghost': sg(nu_ghost),
         'penalty_multiplier_ghost': sg(penalty_ghost),
         'penalty_ghost': sg(ghost_penalty),
+        'dual_update_calls': sg(self.dual_update_calls.read()),
     }
+    hard_dbg = getattr(self.hard, 'debug_info', {})
+    ghost_dbg = getattr(self.ghost, 'debug_info', {})
+    info.update({
+        'Jc_hard': hard_dbg.get('Jc'),
+        'limit_hard': hard_dbg.get('limit'),
+        'g_hard': hard_dbg.get('g'),
+        'lambda_lr_hard': hard_dbg.get('lambda_lr'),
+        'upper_bound_hard': hard_dbg.get('upper_bound'),
+        'lambda_pre_hard': hard_dbg.get('lambda_pre'),
+        'lambda_post_hard': hard_dbg.get('lambda_post'),
+        'penalty_pre_hard': hard_dbg.get('penalty_pre'),
+        'penalty_post_hard': hard_dbg.get('penalty_post'),
+        'Jc_ghost': ghost_dbg.get('Jc'),
+        'limit_ghost': ghost_dbg.get('limit'),
+        'g_ghost': ghost_dbg.get('g'),
+        'lambda_lr_ghost': ghost_dbg.get('lambda_lr'),
+        'upper_bound_ghost': ghost_dbg.get('upper_bound'),
+        'lambda_pre_ghost': ghost_dbg.get('lambda_pre'),
+        'lambda_post_ghost': ghost_dbg.get('lambda_post'),
+        'penalty_pre_ghost': ghost_dbg.get('penalty_pre'),
+        'penalty_post_ghost': ghost_dbg.get('penalty_post'),
+    })
     return total, info
 
   def update(self, hard_ret, ghost_ret):
