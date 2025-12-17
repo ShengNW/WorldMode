@@ -306,7 +306,20 @@ class DualLagrange(nj.Module):
     self.dual_update_calls = nj.Variable(jnp.zeros, (), jnp.int32, name=f'{name}_update_calls')
     self.last_info = {}
 
-  def __call__(self, hard_ret, ghost_ret):
+  def __call__(self, hard_ret, ghost_ret, hard_length=1.0, ghost_length=1.0):
+    return self.update(hard_ret, ghost_ret, hard_length=hard_length, ghost_length=ghost_length)
+
+  def update(self, hard_ret, ghost_ret, hard_length=1.0, ghost_length=1.0):
+    hard_length = jnp.asarray(hard_length, dtype=jnp.float32)
+    ghost_length = jnp.asarray(ghost_length, dtype=jnp.float32)
+    if parallel():
+      mean = lambda x: jax.lax.pmean(x.mean(), 'i')
+    else:
+      mean = jnp.mean
+    Jc_hard_raw = mean(hard_ret)
+    Jc_ghost_raw = mean(ghost_ret)
+    hard_ret = hard_ret * hard_length
+    ghost_ret = ghost_ret * ghost_length
     hard_penalty, nu_hard, penalty_hard = self.hard(hard_ret)
     ghost_penalty, nu_ghost, penalty_ghost = self.ghost(ghost_ret)
     self.dual_update_calls.write(self.dual_update_calls.read() + 1)
@@ -319,6 +332,10 @@ class DualLagrange(nj.Module):
         'penalty_multiplier_ghost': sg(penalty_ghost),
         'penalty_ghost': sg(ghost_penalty),
         'dual_update_calls': sg(self.dual_update_calls.read()),
+        'episode_length_hard': sg(hard_length),
+        'episode_length_ghost': sg(ghost_length),
+        'Jc_hard_raw': sg(Jc_hard_raw),
+        'Jc_ghost_raw': sg(Jc_ghost_raw),
     }
     hard_dbg = getattr(self.hard, 'debug_info', {})
     ghost_dbg = getattr(self.ghost, 'debug_info', {})
@@ -343,9 +360,6 @@ class DualLagrange(nj.Module):
         'penalty_post_ghost': ghost_dbg.get('penalty_post'),
     })
     return total, info
-
-  def update(self, hard_ret, ghost_ret):
-    return self.__call__(hard_ret, ghost_ret)
 
 
 class Moments(nj.Module):

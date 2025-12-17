@@ -409,6 +409,16 @@ class ImagSafeActorCritic(nj.Module):
     self.cost_scales = cost_scales
     self.act_space = act_space
     self.config = config
+    envs_cfg = getattr(self.config, 'envs', None)
+    env_length = 0
+    try:
+      env_length = getattr(envs_cfg, 'length', 0) or (envs_cfg.get('length', 0) if isinstance(envs_cfg, dict) else 0)
+    except Exception:
+      env_length = 0
+    self.lagrange_episode_length = getattr(self.config, 'lagrange_episode_length', None)
+    if not self.lagrange_episode_length:
+      self.lagrange_episode_length = env_length or getattr(self.config, 'horizon', 1)
+    self.ghost_lagrange_episode_length = getattr(self.config, 'ghost_lagrange_episode_length', 1.0)
     self.use_ghost_budget = getattr(self.config, 'use_ghost_budget', False)
     if self.use_ghost_budget:
       self.dual_lagrange = jaxutils.DualLagrange(
@@ -514,14 +524,18 @@ class ImagSafeActorCritic(nj.Module):
       ghost_usage_for_penalty = ghost_usage
       if ghost_usage_for_penalty is None:
         ghost_usage_for_penalty = jnp.zeros_like(cost_ret_episode)
+      hard_length = jnp.array(self.lagrange_episode_length, dtype=jnp.float32)
+      ghost_length = jnp.array(self.ghost_lagrange_episode_length, dtype=jnp.float32)
       if self.use_ghost_budget:
-        penalty, lag_info = self.dual_lagrange(cost_ret_episode, ghost_usage_for_penalty)
+        penalty, lag_info = self.dual_lagrange(cost_ret_episode, ghost_usage_for_penalty, hard_length=hard_length, ghost_length=ghost_length)
         metrics['lagrange_multiplier'] = lag_info['nu_hard']
         metrics['penalty_multiplier'] = lag_info['penalty_multiplier_hard']
         metrics['penalty'] = penalty
         metrics['ghost_lagrange_multiplier'] = lag_info['nu_ghost']
         metrics['ghost_penalty_multiplier'] = lag_info['penalty_multiplier_ghost']
         metrics['ghost_penalty'] = lag_info['penalty_ghost']
+        metrics['lag_episode_length_hard'] = hard_length
+        metrics['lag_episode_length_ghost'] = ghost_length
         # Dual diagnostics for external logging (not relied on by training).
         diag_keys = [
             'Jc_hard', 'Jc_ghost',
@@ -533,6 +547,8 @@ class ImagSafeActorCritic(nj.Module):
             'lambda_post_hard', 'lambda_post_ghost',
             'penalty_pre_hard', 'penalty_pre_ghost',
             'penalty_post_hard', 'penalty_post_ghost',
+            'episode_length_hard', 'episode_length_ghost',
+            'Jc_hard_raw', 'Jc_ghost_raw',
             'dual_update_calls',
         ]
         for k in diag_keys:

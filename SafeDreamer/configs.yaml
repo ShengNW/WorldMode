@@ -113,6 +113,8 @@ defaults:
   # Episode-length used to align dual update with episodic eval metrics.
   # Set to env max_episode_steps / action_repeat if known; default 200 works for SafetyPointGoal1-v0 (1000 steps, repeat=5).
   lagrange_episode_length: 200
+  # Separate scaling for ghost constraint; keep 1.0 unless ghost cost is per-step.
+  ghost_lagrange_episode_length: 1.0
   use_cost: True
   use_ghost_budget: False
   ghost_budget: 1.0
