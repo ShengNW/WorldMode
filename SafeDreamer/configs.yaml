@@ -120,6 +120,8 @@ defaults:
   ghost_budget: 1.0
   ghost_penalty_multiplier_init: 5e-9
   ghost_lagrange_multiplier_init: 1e-6
+  pessimistic: False
+  cost_weight: 10.0
   cost_limit: 25.0
   use_cost_model: True
   return_lambda: 0.95
